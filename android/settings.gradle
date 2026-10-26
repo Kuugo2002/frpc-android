@@ -1,0 +1,15 @@
+pluginManagement {
+    def properties = new Properties()
+    file('local.properties').withReader('UTF-8') { properties.load(it) }
+    def flutterSdk = properties.getProperty('flutter.sdk')
+    assert flutterSdk != null : 'Set flutter.sdk in android/local.properties'
+    includeBuild("$flutterSdk/packages/flutter_tools/gradle")
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+}
+plugins {
+    id 'dev.flutter.flutter-plugin-loader' version '1.0.0'
+    id 'com.android.application' version '8.11.1' apply false
+    id 'org.jetbrains.kotlin.android' version '2.2.20' apply false
+}
+rootProject.name = 'Frpc'
+include ':app'

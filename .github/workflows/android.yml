@@ -1,0 +1,142 @@
+name: Android CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Check, test and build ARM64 APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      FLUTTER_VERSION: '3.47.8'
+      # Match the hosted package source recorded in pubspec.lock.
+      PUB_HOSTED_URL: https://pub.flutter-io.cn
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17 and Gradle cache
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle
+            android/gradle.properties
+            android/gradle/wrapper/gradle-wrapper.properties
+            pubspec.lock
+            .github/workflows/android.yml
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - name: Install Android build packages
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Configure Java and native library stripping
+        run: |
+          flutter config --jdk-dir="$JAVA_HOME"
+          chmod +x android/gradlew
+          if ! command -v llvm-strip-18 >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends llvm-18
+          fi
+          echo "FRPC_LLVM_STRIP=$(command -v llvm-strip-18)" >> "$GITHUB_ENV"
+
+      - name: Resolve locked Flutter dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Check formatting and analyze Dart
+        run: |
+          dart format --output=none --set-exit-if-changed lib test
+          flutter analyze --no-pub --fatal-infos
+
+      - name: Run Flutter tests
+        run: flutter test --no-pub --coverage --reporter expanded
+
+      - name: Run background supervisor regression tests
+        run: bash tests/watchdog.sh
+
+      - name: Check bundled frpc integrity and archive handling
+        run: |
+          echo 'ed49662d0fb8a5ac0a6f532fa4eed599fdb93c7691cbd02e327c7be81f7bcb6f  android/app/src/main/assets/frpc' | sha256sum --check --strict
+          android_jar="$ANDROID_HOME/platforms/android-36/android.jar"
+          classes="$RUNNER_TEMP/frpc-archive-tests"
+          mkdir -p "$classes"
+          javac -encoding UTF-8 -cp "$android_jar" -d "$classes" \
+            android/app/src/main/java/dev/kuugo/frpc/KernelUpdater.java \
+            android/app/src/main/java/dev/kuugo/frpc/RootController.java \
+            tests/KernelArchiveTest.java
+          java -cp "$classes:$android_jar" dev.kuugo.frpc.KernelArchiveTest
+
+      - name: Build release APK
+        run: flutter build apk --release --target-platform android-arm64 --no-pub
+
+      - name: Run Android lint
+        working-directory: android
+        run: ./gradlew lintRelease --console=plain
+
+      - name: Verify and prepare APK artifact
+        run: |
+          apk='build/app/outputs/flutter-apk/app-release.apk'
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/apksigner" verify --verbose "$apk"
+          "$tools/zipalign" -c -P 16 4 "$apk"
+          version=$(sed -nE 's/^version: ([0-9]+\.[0-9]+\.[0-9]+)\+.*/\1/p' pubspec.yaml)
+          test -n "$version"
+          mkdir -p artifacts
+          cp "$apk" "artifacts/Frpc-${version}-arm64.apk"
+          (cd artifacts && sha256sum "Frpc-${version}-arm64.apk" > "Frpc-${version}-arm64.apk.sha256")
+          {
+            echo '### Frpc Android build'
+            echo
+            echo "- Version: $version"
+            echo '- ABI: arm64-v8a'
+            echo '- Download the APK and SHA256 file from this run’s Artifacts section.'
+            echo '- This APK uses a runner-generated debug signing key; it is a test build.'
+            echo '- It cannot replace an installed APK signed with a different key.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Frpc-arm64-${{ github.run_number }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload check reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Android-reports-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            build/app/reports/lint-results-release.*
+            coverage/lcov.info
+          if-no-files-found: ignore
+          retention-days: 14

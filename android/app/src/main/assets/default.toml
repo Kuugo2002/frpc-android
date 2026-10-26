@@ -1,0 +1,18 @@
+# 改成你的 frps 服务器地址、端口和 token
+serverAddr = "your.server.com"
+serverPort = 7000
+auth.method = "token"
+auth.token = "replace-me"
+
+# 登录失败也持续重试，便于网络恢复后自动重连
+loginFailExit = false
+transport.tls.enable = true
+log.to = "console"
+log.level = "info"
+
+[[proxies]]
+name = "android-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8022
+remotePort = 6000
